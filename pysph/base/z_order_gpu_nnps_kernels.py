@@ -1,6 +1,7 @@
 from pysph.base.gpu_helper_kernels import *
 from compyle.api import declare
 from compyle.template import Template
+from compyle.low_level import atomic_inc
 
 
 ################# fill pids ###################3
@@ -13,7 +14,7 @@ def fill_pids(i, x, y, z, cell_size, xmin, ymin, zmin, keys, pids):
         y[i] - ymin,
         z[i] - zmin,
         cell_size, c
-        )
+    )
     key = declare('ulong')
     key = interleave3(c[0], c[1], c[2])
     keys[i] = key

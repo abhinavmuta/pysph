@@ -253,6 +253,7 @@ cdef class ZOrderGPUNNPS(GPUNNPS):
 
         dst_gpu = self.dst.pa.gpu
         src_gpu = self.src.pa.gpu
+
         z_order_nbr_lengths(dst_gpu.x, dst_gpu.y, dst_gpu.z,
                 dst_gpu.h, src_gpu.x, src_gpu.y, src_gpu.z,
                 src_gpu.h,
