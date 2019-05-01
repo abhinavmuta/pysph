@@ -1,7 +1,7 @@
 """
 Incompressible SPH
 """
-import numpy as np
+import numpy
 from compyle.api import declare
 from pysph.sph.scheme import Scheme
 from pysph.base.utils import get_particle_array
@@ -18,8 +18,7 @@ def get_particle_array_isph(constants=None, **props):
     # No of particles
     N = len(props['gid'])
     consts = {
-        'nop': np.array([N], dtype=int),
-        'lhs': np.zeros([N*N], dtype=float),
+        'np': numpy.array([N], dtype=int),
     }
 
     if constants:
@@ -163,9 +162,8 @@ class DensityInvariance(Equation):
 
 
 class PressureCoeffMatrix(Equation):
-    def initialize(self, d_idx, d_nop, d_lhs, d_ctr, d_coeff, d_diag, d_col_idx):
+    def initialize(self, d_idx, d_ctr, d_diag, d_col_idx):
         # Make only the diagonals zero as the rest are not summed.
-        d_lhs[d_idx*d_nop[0] + d_idx] = 0.0
         d_diag[d_idx] = 0.0
         d_ctr[d_idx] = 0
 
@@ -175,9 +173,8 @@ class PressureCoeffMatrix(Equation):
         for i in range(100):
             d_col_idx[d_idx*100 + i] = -1
 
-    def loop(self, d_idx, s_idx, s_m, d_rho, s_rho, d_nop, d_lhs, d_gid,
-             d_coeff, d_ctr, d_col_idx, d_row_idx, d_diag, XIJ, DWIJ,
-             R2IJ, EPS):
+    def loop(self, d_idx, s_idx, s_m, d_rho, s_rho, d_gid, d_coeff, d_ctr,
+             d_col_idx, d_row_idx, d_diag, XIJ, DWIJ, R2IJ, EPS):
         rhoij = (s_rho[s_idx] + d_rho[d_idx])
         rhoij2_1 = 1.0/(rhoij*rhoij)
 
@@ -185,14 +182,11 @@ class PressureCoeffMatrix(Equation):
 
         fac = 8.0 * s_m[s_idx] * rhoij2_1 * xdotdwij / (R2IJ + EPS)
 
-        n, j, k = declare('int', 3)
-        n = d_nop[0]
+        j, k = declare('int', 3)
         j = d_gid[s_idx]
-        if d_idx != j:
-            d_lhs[d_idx*n + j] = -fac
-        d_lhs[d_idx*n + d_idx] += fac
 
         d_diag[d_idx] += fac
+
         k = int(d_ctr[d_idx])
         d_coeff[d_idx*100 + k] = -fac
         d_col_idx[d_idx*100 + k] = j
@@ -202,37 +196,30 @@ class PressureCoeffMatrix(Equation):
 
 class PPESolve(Equation):
     def py_initialize(self, dst, t, dt):
-        import numpy as np
         import scipy.sparse as sp
         from scipy.sparse.linalg import bicgstab
 
         coeff = declare('object')
+        cond = declare('object')
         n = declare('int')
-        n = dst.nop[0]
+        n = dst.np[0]
 
+        # Mask all indices which are not used in the construction.
         cond = (dst.col_idx != -1)
 
-        coeff = dst.lhs.reshape(n, n)
-        c1 = declare('object')
-        # precond = declare('object')
+        coeff = sp.csr_matrix(
+            (dst.coeff[cond], (dst.col_idx[cond], dst.row_idx[cond])),
+            shape=(n, n)
+        )
+        # Add tiny random noise so the matrix is not singular.
+        dst.diag -= numpy.random.random(n)
 
-        c1 = sp.csr_matrix((dst.coeff[cond], (dst.col_idx[cond],
-                                              dst.row_idx[cond])), shape=(n, n))
-        c1 += sp.diags(dst.diag)
+        coeff += sp.diags(dst.diag)
 
-        assert (c1 - coeff < 1e-9).all()
         # Pseudo-Neumann boundary conditions
         dst.rhs[:] -= dst.rhs.mean()
 
-        # Set coeff of 1st particle to zero
-        coeff -= np.diag(np.random.random(n))
-
-        coeff = sp.csr_matrix(coeff)
-        # precond = np.diag(np.diag(coeff))
-
-        # Use of precond makes it slow.
-        # dst.p[:], exitcode = bicgstab(coeff, dst.rhs, x0=dst.p, M=precond)
-        dst.p[:], exitcode = bicgstab(coeff, dst.rhs, x0=dst.p)
+        dst.p[:], _exitcode = bicgstab(coeff, dst.rhs, x0=dst.p, M=sp.diags(dst.diag))
 
 
 class MomentumEquationPressureGradient(Equation):
@@ -260,9 +247,9 @@ class FreeSurface(Equation):
     def loop(self, d_idx, d_rho, d_divr, Vj, XDOTDWIJ):
         d_divr += -Vj * XDOTDWIJ
 
-    def post_loop(self, d_divr, d_gid, d_idx, d_nop, A):
+    def post_loop(self, d_divr, d_gid, d_idx, d_np, A):
         if d_divr[d_idx] < self.beta:
-            A[d_idx * d_nop[0] * d_gid[d_idx]] = 1.0
+            A[d_idx * d_np[0] * d_gid[d_idx]] = 1.0
 
 
 class MESchwaiger(MomentumEquationViscosity):
@@ -302,7 +289,7 @@ class MESchwaiger(MomentumEquationViscosity):
 
 class ISPHScheme(Scheme):
     def __init__(self, fluids, solids, dim, nu, rho0, gx=0.0, gy=0.0, gz=0.0,
-                 variant="CR"):
+                 variant="DF"):
         self.fluids = fluids
         self.solver = None
         self.dim = dim
@@ -317,7 +304,7 @@ class ISPHScheme(Scheme):
         group.add_argument(
             "--variant", action="store", dest="variant",
             type=str, choices=['DF', 'DI', 'DFDI'],
-            help="ISPH variant (defaults to \"CR\" Cummins and Rudmann)."
+            help="ISPH variant (defaults to \"DF\" Cummins and Rudmann)."
         )
 
     def consume_user_options(self, options):
@@ -406,7 +393,7 @@ class ISPHScheme(Scheme):
                                         gid=particle_arrays['fluid'].gid)
         props = []
         for x, arr in dummy.properties.items():
-            tmp = dict(name=x, type=arr.get_c_type(), data=arr)
+            tmp = dict(name=x, type=arr.get_c_type())
             if x in dummy.stride:
                 tmp.update(stride=dummy.stride[x])
             props.append(tmp)
