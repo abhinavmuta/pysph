@@ -221,7 +221,8 @@ class TaylorGreen(Application):
             rho_cutoff=0.2, internal_flow=True, gtvf=True
         )
         isph = ISPHScheme(
-            fluids=['fluid'], solids=[], dim=2, nu=None, rho0=rho0
+            fluids=['fluid'], solids=[], dim=2, nu=None, rho0=rho0, c0=c0,
+            alpha=0.0
         )
         s = SchemeChooser(
             default='tvf', wcsph=wcsph, tvf=tvf, edac=edac, iisph=iisph,
