@@ -3,7 +3,7 @@ Incompressible SPH
 """
 import numpy
 from compyle.api import declare
-from pysph.sph.scheme import Scheme
+from pysph.sph.scheme import Scheme, add_bool_argument
 from pysph.base.utils import get_particle_array
 from pysph.sph.integrator import Integrator
 from pysph.sph.integrator_step import IntegratorStep
@@ -341,7 +341,8 @@ class CheckDensityError(Equation):
 
 class ISPHScheme(Scheme):
     def __init__(self, fluids, solids, dim, nu, rho0, c0, alpha, beta=0.0,
-                 gx=0.0, gy=0.0, gz=0.0, tolerance=0.01, variant="DF"):
+                 gx=0.0, gy=0.0, gz=0.0, tolerance=0.01, variant="DF",
+                 symmetric=False,):
         self.fluids = fluids
         self.solver = None
         self.dim = dim
@@ -355,6 +356,7 @@ class ISPHScheme(Scheme):
         self.variant = variant
         self.tolerance = tolerance
         self.rho0 = rho0
+        self.symmetric = symmetric
 
     def add_user_options(self, group):
         group.add_argument(
@@ -367,9 +369,13 @@ class ISPHScheme(Scheme):
             default=None,
             help='Artificial viscosity.'
         )
+        add_bool_argument(
+            group, 'symmetric', dest='symmetric', default=None,
+            help='Use symmetric form of pressure gradient.'
+        )
 
     def consume_user_options(self, options):
-        _vars = ['variant', 'alpha']
+        _vars = ['variant', 'alpha', 'symmetric']
         data = dict((var, self._smart_getattr(options, var))
                     for var in _vars)
         self.configure(**data)
@@ -519,9 +525,15 @@ class ISPHScheme(Scheme):
         # Compute acceleration due to pressure, initialize au/av/aw to 0.
         eq4 = []
         for fluid in self.fluids:
-            eq4.append(
-                MomentumEquationPressureGradient(dest=fluid, sources=all)
-            )
+            if self.symmetric:
+                eq4.append(
+                    MomentumEquationPressureGradientSymmetric(dest=fluid,
+                                                              sources=all)
+                )
+            else:
+                eq4.append(
+                    MomentumEquationPressureGradient(dest=fluid, sources=all)
+                )
         stg2.append(Group(equations=eq4))
         all_eqns.append(stg2)
 
