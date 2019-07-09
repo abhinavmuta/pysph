@@ -129,7 +129,8 @@ class ISPHStep(IntegratorStep):
 
 
 class ISPHDIStep(ISPHStep):
-    def stage1(self, d_idx, d_x, d_y, d_z, d_u, d_v, d_w, d_au, d_av, d_aw, dt):
+    def stage1(self, d_idx, d_x, d_y, d_z, d_u, d_v, d_w, d_au, d_av, d_aw,
+               dt):
         d_u[d_idx] += dt*d_au[d_idx]
         d_v[d_idx] += dt*d_av[d_idx]
         d_w[d_idx] += dt*d_aw[d_idx]
@@ -174,6 +175,11 @@ class MomentumEquationBodyForce(Equation):
         self.gy = gy
         self.gz = gz
         super(MomentumEquationBodyForce, self).__init__(dest, sources)
+
+    def initialize(self, d_idx, d_au, d_av, d_aw):
+        d_au[d_idx] = 0.0
+        d_av[d_idx] = 0.0
+        d_aw[d_idx] = 0.0
 
     def post_loop(self, d_idx, d_au, d_av, d_aw):
         d_au[d_idx] += self.gx
@@ -264,16 +270,17 @@ class PPESolve(Equation):
         cond = (dst.col_idx != -1)
 
         coeff = sp.csr_matrix(
-            (dst.coeff[cond], (dst.col_idx[cond], dst.row_idx[cond])),
+            (dst.coeff[cond], (dst.row_idx[cond], dst.col_idx[cond])),
             shape=(n, n)
         )
         # Add tiny random noise so the matrix is not singular.
-        dst.diag -= numpy.random.random(n)
+        cond = abs(dst.rhs) > 1e-9
+        dst.diag[cond] -= numpy.random.random(n)[cond]
 
         coeff += sp.diags(dst.diag)
 
         # Pseudo-Neumann boundary conditions
-        dst.rhs[:] -= dst.rhs.mean()
+        dst.rhs[cond] -= dst.rhs[cond].mean()
 
         dst.p[:], ec = bicgstab(coeff, dst.rhs, x0=dst.p)
         assert ec == 0, "Not converging!"
@@ -339,10 +346,61 @@ class CheckDensityError(Equation):
         return self.conv
 
 
+class FreeSurfaceBoundaryCondition(Equation):
+    def initialize(self, d_rho, d_rho0, d_rhs, d_diag, d_idx, d_coeff, d_ctr,
+                   d_col_idx, d_row_idx):
+        i = declare('int')
+        if d_rho[d_idx]/d_rho0[d_idx] < 0.98:
+            d_rhs[d_idx] = 0.0
+            d_diag[d_idx] = 1.0
+            d_ctr[d_idx] = 1
+            for i in range(100):
+                d_coeff[d_idx*100 + i] = 0.0
+                d_col_idx[d_idx*100 + i] = -1
+                d_row_idx[d_idx*100 + i] = d_idx
+
+
+class MomentumEquationPressureGradientSymmetricMirror(Equation):
+    def initialize(self, d_idx, d_au, d_av, d_aw):
+        d_au[d_idx] = 0.0
+        d_av[d_idx] = 0.0
+        d_aw[d_idx] = 0.0
+
+    def loop(self, d_idx, s_idx, s_m, d_p, s_p, d_rho, s_rho, d_au, d_av, d_aw,
+             s_rho0, DWIJ, XIJ, RIJ, HIJ, SPH_KERNEL):
+        rhoi2 = d_rho[d_idx]*d_rho[d_idx]
+        rhoj2 = s_rho[s_idx]*s_rho[s_idx]
+        pij = d_p[d_idx]/rhoi2 + s_p[s_idx]/rhoj2
+        fac = -s_m[s_idx] * pij
+        xij = declare('matrix(3)')
+        dwij = declare('matrix(3)')
+
+        if s_rho[s_idx]/s_rho0[s_idx] < 0.98:
+            rhoi2 = d_rho[d_idx]*d_rho[d_idx]
+            rhoj2 = s_rho[s_idx]*s_rho[s_idx]
+            # Shao and Lao mirror condition, Pj = -Pi.
+            pij = d_p[d_idx]/rhoi2 - d_p[d_idx]/rhoj2
+            fac = -s_m[s_idx] * pij
+
+            xij[0] = XIJ[0]*2
+            xij[1] = XIJ[1]*2
+            xij[2] = XIJ[2]*2
+
+            SPH_KERNEL.gradient(xij, 2*RIJ, HIJ, dwij)
+
+            d_au[d_idx] += fac * dwij[0]
+            d_av[d_idx] += fac * dwij[1]
+            d_aw[d_idx] += fac * dwij[2]
+        else:
+            d_au[d_idx] += fac * DWIJ[0]
+            d_av[d_idx] += fac * DWIJ[1]
+            d_aw[d_idx] += fac * DWIJ[2]
+
+
 class ISPHScheme(Scheme):
     def __init__(self, fluids, solids, dim, nu, rho0, c0, alpha, beta=0.0,
                  gx=0.0, gy=0.0, gz=0.0, tolerance=0.01, variant="DF",
-                 symmetric=False,):
+                 symmetric=False):
         self.fluids = fluids
         self.solver = None
         self.dim = dim
@@ -429,16 +487,16 @@ class ISPHScheme(Scheme):
 
         eq = []
         for fluid in self.fluids:
-            if variant.endswith('DI'):
-                eq.append(
-                    MomentumEquationViscosity(dest=fluid, sources=all,
-                                              nu=self.nu)
-                )
-            else:
-                eq.append(
-                    LaminarViscosity(dest=fluid, sources=self.fluids,
-                                     nu=self.nu)
-                )
+            # if variant.endswith('DI'):
+                # eq.append(
+                    # MomentumEquationViscosity(dest=fluid, sources=all,
+                                              # nu=self.nu)
+                # )
+            # else:
+            eq.append(
+                LaminarViscosity(dest=fluid, sources=self.fluids,
+                                 nu=self.nu)
+            )
             eq.append(
                 MomentumEquationArtificialViscosity(
                     dest=fluid, sources=self.fluids, c0=self.c0,
@@ -476,6 +534,11 @@ class ISPHScheme(Scheme):
             else:
                 eq2.append(VelocityDivergence(dest=fluid, sources=all))
             eq2.append(PressureCoeffMatrix(dest=fluid, sources=all))
+        stg.append(Group(equations=eq2))
+
+        eq2 = []
+        for fluid in self.fluids:
+            eq2.append(FreeSurfaceBoundaryCondition(dest=fluid, sources=all))
         stg.append(Group(equations=eq2))
 
         eq22 = []
